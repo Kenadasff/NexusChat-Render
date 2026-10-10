@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: nexuschat
-    runtime: static
-    buildCommand: npm run build
-    staticPublishPath: ./dist
-    pullRequestPreviewsEnabled: false
