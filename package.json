@@ -71,6 +71,7 @@
     "@types/node": "^22.15.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "@types/socket.io-client": "^3.0.0",
     "@vitejs/plugin-react": "^4.6.0"
   },
   "engines": {
