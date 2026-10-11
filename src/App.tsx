@@ -1,37 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Archive,
-  Bell,
-  BellOff,
-  Check,
-  ChevronDown,
-  Flag,
-  LogOut,
-  Menu,
-  MoreHorizontal,
-  Paperclip,
-  Plus,
-  Search,
-  Send,
-  Settings,
-  ShieldOff,
-  Smile,
-  Sparkles,
-  Trash2,
-  UserPlus,
-  Users,
-  UserX,
-} from "lucide-react";
+import { Menu, Search, Plus, Settings, LogOut, Send, Sparkles } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Switch } from "@/components/ui/switch";
 import { AuthScreen } from "@/components/AuthScreen";
 import { SettingsDialog } from "@/components/SettingsDialog";
-import { ContactsDialog } from "@/components/ContactsDialog";
+import { Label } from "@/components/ui/label";
 import {
   Account,
   AccountData,
   Channel,
-  Contact,
   getSession,
   initialsFrom,
   loadAccountData,
@@ -44,29 +20,19 @@ import {
   translations,
 } from "@/lib/store";
 
-// 🟢 LE CLIENT SOCKET.IO CONNECTÉ À VOTRE SERVEUR RENDER
 import { io } from "socket.io-client";
 const socket = io("https://onrender.com", {
   autoConnect: true,
 });
 
 type Selected = { type: "contact"; id: string } | { type: "channel"; id: string };
-
 const EMOJI_CHOICES = ["💬", "🏠", "🎮", "🎬", "🎵", "📚", "⚽", "🧑‍💻"];
-
-const EMOJI_PICKER_SET = [
-  "😀", "😂", "😍", "😉", "😎", "🤔", "😅", "😢",
-  "😡", "😱", "🥳", "😴", "🙄", "😇", "🤗", "🤩",
-  "👍", "👎", "👌", "🙏", "👏", "💪", "🤝", "👋",
-  "❤️", "🔥", "✨", "🎉", "🎯", "💯", "⭐", "✅",
-  "😊", "😜", "🤯", "😭", "🥶", "🤫", "👀", "💡",
-];
 
 function Avatar({ initials, online = false }: { initials: string; online?: boolean }) {
   return (
     <div className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
       {initials}
-      {online && <span className="status-dot" aria-label="En ligne" />}
+      {online && <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-background bg-emerald-500" />}
     </div>
   );
 }
@@ -75,29 +41,16 @@ export default function App() {
   const [account, setAccount] = useState<Account | null>(null);
   const [booting, setBooting] = useState(true);
   const [data, setData] = useState<AccountData | null>(null);
-
   const [selected, setSelected] = useState<Selected>({ type: "contact", id: "assistant" });
   const [text, setText] = useState("");
   const [search, setSearch] = useState("");
   const [mobileSidebar, setMobileSidebar] = useState(false);
-
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [contactsOpen, setContactsOpen] = useState(false);
   const [createChannelOpen, setCreateChannelOpen] = useState(false);
-  const [reportOpen, setReportOpen] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
-  const [emojiOpen, setEmojiOpen] = useState(false);
-  const [addContactOpen, setAddContactOpen] = useState(false);
-
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelEmoji, setNewChannelEmoji] = useState(EMOJI_CHOICES[0]);
-  const [reportText, setReportText] = useState("");
-  const [addContactUsername, setAddContactUsername] = useState("");
-  const [addContactError, setAddContactError] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     const sessionId = getSession();
@@ -112,40 +65,35 @@ export default function App() {
     setBooting(false);
   }, []);
 
-  // 🟢 ECOUTER LES MESSAGES DISTANTS EN TEMPS RÉEL
   useEffect(() => {
     socket.on("receive_message", (msgData: { text: string; sender: string; room: string; type: "contact" | "channel" }) => {
       if (!data) return;
-
       const incomingMessage = {
         id: Date.now(),
-        text: msgData.text,
+        text: `${msgData.sender}: ${msgData.text}`,
         mine: false,
         time: timeNow(),
       };
-
-      updateData((d) => {
+      setData((prev) => {
+        if (!prev) return prev;
         if (msgData.type === "contact") {
           return {
-            ...d,
-            contacts: d.contacts.map((c) =>
+            ...prev,
+            contacts: prev.contacts.map((c) =>
               c.id === msgData.room ? { ...c, preview: msgData.text, messages: [...c.messages, incomingMessage] } : c
             ),
           };
         } else {
           return {
-            ...d,
-            channels: d.channels.map((c) =>
+            ...prev,
+            channels: prev.channels.map((c) =>
               c.id === msgData.room ? { ...c, preview: msgData.text, messages: [...c.messages, incomingMessage] } : c
             ),
           };
         }
       });
     });
-
-    return () => {
-      socket.off("receive_message");
-    };
+    return () => { socket.off("receive_message"); };
   }, [data, selected]);
 
   useEffect(() => {
@@ -164,26 +112,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!data) return;
-    const root = document.documentElement;
-    const apply = (dark: boolean) => root.classList.toggle("dark", dark);
-    if (data.settings.theme === "dark") apply(true);
-    else if (data.settings.theme === "light") apply(false);
-    else {
-      const mq = window.matchMedia("(prefers-color-scheme: dark)");
-      apply(mq.matches);
-      const listener = (e: MediaQueryListEvent) => apply(e.matches);
-      mq.addEventListener("change", listener);
-      return () => mq.removeEventListener("change", listener);
-    }
-  }, [data?.settings.theme]);
-
-  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [selected, data]);
 
   if (booting) return null;
-
   if (!account || !data) {
     return (
       <AuthScreen
@@ -196,69 +128,17 @@ export default function App() {
     );
   }
 
-  const tr = translations[data.settings.language];
-
-  function updateData(mutator: (draft: AccountData) => AccountData) {
-    setData((prev) => (prev ? mutator(prev) : prev));
-  }
-
-  function updateSettings(patch: Partial<AccountData["settings"]>) {
-    updateData((d) => ({ ...d, settings: { ...d.settings, ...patch } }));
-  }
-
-  function updateAccountInfo(patch: Partial<Account>) {
-    if (!account) return;
-    const updated = { ...account, ...patch };
-    setAccount(updated);
-    const accounts = loadAccounts().map((a) => (a.id === updated.id ? updated : a));
-    saveAccounts(accounts);
-  }
-
-  function pushNotification(msg: string) {
-    if (!data!.settings.notificationsEnabled) return;
-    updateData((d) => ({
-      ...d,
-      notifications: [{ id: Date.now(), text: msg, time: timeNow(), read: false }, ...d.notifications].slice(0, 30),
-    }));
-  }
-
+  const tr = translations[data.settings.language || "fr"];
   const activeContact = selected.type === "contact" ? data.contacts.find((c) => c.id === selected.id) : undefined;
   const activeChannel = selected.type === "channel" ? data.channels.find((c) => c.id === selected.id) : undefined;
-  const isBlocked = activeContact ? data.blocked.includes(activeContact.id) : false;
-
-  const visibleContacts = data.contacts.filter(
-    (c) => !c.archived && c.name.toLocaleLowerCase("fr-FR").includes(search.toLocaleLowerCase("fr-FR")),
-  );
-  const visibleChannels = data.channels.filter(
-    (c) => !c.archived && c.name.toLocaleLowerCase("fr-FR").includes(search.toLocaleLowerCase("fr-FR")),
-  );
-
-  function selectContact(id: string) {
-    setSelected({ type: "contact", id });
-    setMobileSidebar(false);
-    updateData((d) => ({
-      ...d,
-      contacts: d.contacts.map((c) => (c.id === id ? { ...c, unread: 0 } : c)),
-    }));
-  }
-
-  function selectChannel(id: string) {
-    setSelected({ type: "channel", id });
-    setMobileSidebar(false);
-    updateData((d) => ({
-      ...d,
-      channels: d.channels.map((c) => (c.id === id ? { ...c, unread: 0 } : c)),
-    }));
-  }
+  const visibleContacts = data.contacts.filter((c) => !c.archived && c.name.toLowerCase().includes(search.toLowerCase()));
+  const visibleChannels = data.channels.filter((c) => !c.archived && c.name.toLowerCase().includes(search.toLowerCase()));
 
   function sendMessage() {
     const value = text.trim();
     if (!value) return;
-    if (activeContact && isBlocked) return;
-
     const message = { id: Date.now(), text: value, mine: true, time: timeNow() };
 
-    // 🟢 TRANSMISSION EN DIRECT AU SERVEUR WEB
     socket.emit("send_message", {
       text: value,
       sender: account.displayName,
@@ -266,40 +146,38 @@ export default function App() {
       type: selected.type
     });
 
-    if (selected.type === "contact") {
-      const contactId = selected.id;
-      updateData((d) => ({
-        ...d,
-        contacts: d.contacts.map((c) =>
-          c.id === contactId ? { ...c, preview: value, messages: [...c.messages, message] } : c,
-        ),
-      }));
-
-      if (activeContact?.kind === "assistant") {
-        const reply = assistantReply(value, data.settings.language);
-        setTimeout(() => {
-          updateData((d) => ({
-            ...d,
-            contacts: d.contacts.map((c) =>
-              c.id === "assistant"
-                ? {
-                    ...c,
-                    preview: reply,
-                    messages: [...c.messages, { id: Date.now() + 1, text: reply, mine: false, time: timeNow() }],
-                  }
-                : c,
-            ),
-          }));
-        }, 500);
+    setData((prev) => {
+      if (!prev) return prev;
+      if (selected.type === "contact") {
+        return {
+          ...prev,
+          contacts: prev.contacts.map((c) =>
+            c.id === selected.id ? { ...c, preview: value, messages: [...c.messages, message] } : c
+          ),
+        };
+      } else {
+        return {
+          ...prev,
+          channels: prev.channels.map((c) =>
+            c.id === selected.id ? { ...c, preview: value, messages: [...c.messages, message] } : c
+          ),
+        };
       }
-    } else if (selected.type === "channel") {
-      const channelId = selected.id;
-      updateData((d) => ({
-        ...d,
-        channels: d.channels.map((c) =>
-          c.id === channelId ? { ...c, preview: value, messages: [...c.messages, message] } : c,
-        ),
-      }));
+    });
+
+    if (activeContact?.kind === "assistant") {
+      const reply = assistantReply(value, data.settings.language);
+      setTimeout(() => {
+        setData((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            contacts: prev.contacts.map((c) =>
+              c.id === "assistant" ? { ...c, preview: reply, messages: [...c.messages, { id: Date.now() + 1, text: reply, mine: false, time: timeNow() }] } : c
+            ),
+          };
+        });
+      }, 500);
     }
     setText("");
   }
@@ -308,16 +186,8 @@ export default function App() {
     const name = newChannelName.trim();
     if (!name) return;
     const id = `salon-${Date.now()}`;
-    const channel: Channel = {
-      id,
-      name,
-      emoji: newChannelEmoji,
-      archived: false,
-      unread: 0,
-      preview: "",
-      messages: [],
-    };
-    updateData((d) => ({ ...d, channels: [...d.channels, channel] }));
+    const channel: Channel = { id, name, emoji: newChannelEmoji, archived: false, unread: 0, preview: "", messages: [] };
+    setData((prev) => prev ? { ...prev, channels: [...prev.channels, channel] } : prev);
     setNewChannelName("");
     setCreateChannelOpen(false);
     setSelected({ type: "channel", id });
@@ -325,3 +195,49 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
+      <div className={`fixed inset-y-0 left-0 z-40 flex w-80 flex-col border-r bg-card transition-transform lg:static lg:translate-x-0 ${mobileSidebar ? "translate-x-0" : "-translate-x-full"}`}>
+        <div className="flex h-16 items-center justify-between px-4 border-b">
+          <span className="text-xl font-bold tracking-tight text-primary flex items-center gap-2">
+            <Sparkles className="h-5 w-5" /> NexusChat
+          </span>
+          <button className="lg:hidden p-1.5 hover:bg-muted rounded-md" onClick={() => setMobileSidebar(false)}><Menu className="h-5 w-5" /></button>
+        </div>
+        <div className="p-4 border-b">
+          <div className="relative">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <input type="text" placeholder={tr.searchPlaceholder} className="w-full rounded-md border bg-muted/50 py-2 pl-9 pr-4 text-sm focus:outline-none" value={search} onChange={(e) => setSearch(e.target.value)} />
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+          <div>
+            <div className="flex items-center justify-between mb-2 text-xs font-semibold uppercase text-muted-foreground">
+              <span>{tr.channels}</span>
+              <button onClick={() => setCreateChannelOpen(true)} className="p-1 hover:bg-muted rounded"><Plus className="h-4 w-4" /></button>
+            </div>
+            <div className="space-y-1">
+              {visibleChannels.map((c) => (
+                <button key={c.id} onClick={() => { setSelected({ type: "channel", id: c.id }); setMobileSidebar(false); }} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium ${selected.type === "channel" && selected.id === c.id ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
+                  <span>{c.emoji}</span><span className="truncate">{c.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground"><span>{tr.directMessages}</span></div>
+            <div className="space-y-1">
+              {visibleContacts.map((c) => (
+                <button key={c.id} onClick={() => { setSelected({ type: "contact", id: c.id }); setMobileSidebar(false); }} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium ${selected.type === "contact" && selected.id === c.id ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
+                  <Avatar initials={initialsFrom(c.name)} online={c.kind === "assistant"} /><span className="truncate">{c.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="p-4 border-t flex items-center justify-between bg-muted/30">
+          <div className="flex items-center gap-3 truncate">
+            <Avatar initials={initialsFrom(account.displayName)} />
+            <div className="flex flex-col truncate">
+              <span className="text-sm font-medium leading-none">{account.displayName}</span>
+              <span className="text-xs text-muted-foreground">@{account.username}</span>
+            </div>
+          </div>
