@@ -1,71 +1,44 @@
 import { useState } from "react";
 import { Sparkles } from "lucide-react";
-import {
-  Account,
-  initialsFrom,
-  loadAccounts,
-  saveAccounts,
-  translations,
-  type Lang,
-} from "@/lib/store";
+import { api, ApiError, setToken, type Me } from "@/lib/api";
+import { translations, type Lang } from "@/lib/store";
 
-export function AuthScreen({
-  lang,
-  onAuthenticated,
-}: {
-  lang: Lang;
-  onAuthenticated: (account: Account) => void;
-}) {
+export function AuthScreen({ lang, onAuthenticated }: { lang: Lang; onAuthenticated: (user: Me) => void }) {
   const tr = translations[lang];
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const accounts = loadAccounts();
-
-    if (mode === "login") {
-      const found = accounts.find(
-        (a) => a.username.toLowerCase() === username.trim().toLowerCase() && a.password === password,
-      );
-      if (!found) {
-        setError(tr.invalidCreds);
-        return;
-      }
-      onAuthenticated(found);
-      return;
-    }
-
-    if (!username.trim() || !password || !displayName.trim()) {
+    if (!username.trim() || !password || (mode === "register" && !displayName.trim())) {
       setError(tr.fillFields);
       return;
     }
-    if (accounts.some((a) => a.username.toLowerCase() === username.trim().toLowerCase())) {
-      setError(tr.userExists);
-      return;
+    setLoading(true);
+    try {
+      const res =
+        mode === "login"
+          ? await api.login(username.trim(), password)
+          : await api.register(username.trim(), displayName.trim(), password);
+      setToken(res.token);
+      onAuthenticated(res.user);
+    } catch (err) {
+      setError(err instanceof ApiError && err.status === 0 ? tr.networkError : (err as Error).message);
+    } finally {
+      setLoading(false);
     }
-    const newAccount: Account = {
-      id: `user-${Date.now()}`,
-      username: username.trim(),
-      password,
-      displayName: displayName.trim(),
-      initials: initialsFrom(displayName.trim()),
-    };
-    saveAccounts([...accounts, newAccount]);
-    onAuthenticated(newAccount);
   }
 
   return (
     <div className="auth-shell">
       <div className="auth-card">
         <div className="auth-brand">
-          <div className="brand-mark">
-            <Sparkles size={20} />
-          </div>
+          <div className="brand-mark"><Sparkles size={20} /></div>
           <span>{tr.appName}</span>
         </div>
         <p className="auth-tagline">{tr.tagline}</p>
@@ -74,48 +47,27 @@ export function AuthScreen({
           {mode === "register" && (
             <label className="auth-field">
               <span>{tr.displayName}</span>
-              <input
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Alex Dupont"
-                autoComplete="name"
-              />
+              <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Alex Dupont" autoComplete="name" maxLength={40} />
             </label>
           )}
           <label className="auth-field">
             <span>{tr.username}</span>
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="alex"
-              autoComplete="username"
-            />
+            <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="alex" autoComplete="username" maxLength={20} autoCapitalize="none" />
           </label>
           <label className="auth-field">
             <span>{tr.password}</span>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-            />
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete={mode === "login" ? "current-password" : "new-password"} />
           </label>
 
           {error && <div className="auth-error">{error}</div>}
+          {loading && <div className="settings-hint">{tr.serverWaking}</div>}
 
-          <button type="submit" className="auth-submit">
+          <button type="submit" className="auth-submit" disabled={loading}>
             {mode === "login" ? tr.loginCta : tr.registerCta}
           </button>
         </form>
 
-        <button
-          className="auth-switch"
-          onClick={() => {
-            setMode(mode === "login" ? "register" : "login");
-            setError(null);
-          }}
-        >
+        <button className="auth-switch" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(null); }}>
           {mode === "login" ? tr.noAccount : tr.haveAccount}
         </button>
       </div>

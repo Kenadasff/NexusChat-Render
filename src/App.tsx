@@ -1,243 +1,419 @@
-import { useEffect, useRef, useState } from "react";
-import { Menu, Search, Plus, Settings, LogOut, Send, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Socket } from "socket.io-client";
+import { Ban, CheckCircle2, Menu, Plus, Search, Send, Settings as SettingsIcon, Sparkles, UserPlus, LogOut } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AuthScreen } from "@/components/AuthScreen";
 import { SettingsDialog } from "@/components/SettingsDialog";
-import { Label } from "@/components/ui/label";
+import { FriendsDialog } from "@/components/FriendsDialog";
 import {
-  Account,
-  AccountData,
-  Channel,
-  getSession,
-  initialsFrom,
-  loadAccountData,
-  loadAccounts,
-  saveAccountData,
-  saveAccounts,
-  setSession,
-  assistantReply,
-  timeNow,
-  translations,
+  api, ApiError, connectSocket, getToken, setToken,
+  type Channel, type FriendEntry, type Me, type Msg, type Permission, type User,
+} from "@/lib/api";
+import {
+  assistantReply, initialsFrom, loadLocalSettings, saveLocalSettings, timeOf, translations,
+  type LocalSettings,
 } from "@/lib/store";
 
-import { io } from "socket.io-client";
-const socket = io("https://onrender.com", {
-  autoConnect: true,
-});
+type Sel = { type: "assistant" } | { type: "dm"; id: number } | { type: "channel"; id: number };
+type ViewMsg = { id: string | number; mine: boolean; author?: string; text: string; time: string };
 
-type Selected = { type: "contact"; id: string } | { type: "channel"; id: string };
 const EMOJI_CHOICES = ["💬", "🏠", "🎮", "🎬", "🎵", "📚", "⚽", "🧑‍💻"];
+const keyOf = (s: Sel) => (s.type === "assistant" ? "assistant" : `${s.type}:${s.id}`);
 
 function Avatar({ initials, online = false }: { initials: string; online?: boolean }) {
   return (
-    <div className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary text-sm font-bold text-primary-foreground">
+    <div className="contact-avatar" style={{ position: "relative" }}>
       {initials}
-      {online && <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-background bg-emerald-500" />}
+      {online && <span className="status-dot" />}
     </div>
   );
 }
 
 export default function App() {
-  const [account, setAccount] = useState<Account | null>(null);
   const [booting, setBooting] = useState(true);
-  const [data, setData] = useState<AccountData | null>(null);
-  const [selected, setSelected] = useState<Selected>({ type: "contact", id: "assistant" });
+  const [me, setMe] = useState<Me | null>(null);
+  const [settings, setSettings] = useState<LocalSettings>(loadLocalSettings);
+  const [friends, setFriends] = useState<FriendEntry[]>([]);
+  const [incoming, setIncoming] = useState<FriendEntry[]>([]);
+  const [outgoing, setOutgoing] = useState<FriendEntry[]>([]);
+  const [blocked, setBlocked] = useState<User[]>([]);
+  const [partners, setPartners] = useState<User[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [messages, setMessages] = useState<Record<string, Msg[]>>({});
+  const [previews, setPreviews] = useState<Record<string, string>>({});
+  const [unread, setUnread] = useState<Record<string, number>>({});
+  const [online, setOnline] = useState<Set<number>>(new Set());
+  const [assistantMsgs, setAssistantMsgs] = useState<ViewMsg[]>([]);
+  const [selected, setSelected] = useState<Sel>({ type: "assistant" });
   const [text, setText] = useState("");
   const [search, setSearch] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
   const [mobileSidebar, setMobileSidebar] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [friendsOpen, setFriendsOpen] = useState(false);
   const [createChannelOpen, setCreateChannelOpen] = useState(false);
   const [newChannelName, setNewChannelName] = useState("");
   const [newChannelEmoji, setNewChannelEmoji] = useState(EMOJI_CHOICES[0]);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const tr = translations[settings.language];
+  const endRef = useRef<HTMLDivElement>(null);
+  const selRef = useRef<Sel>(selected);
+  const incomingIdsRef = useRef<number[] | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  selRef.current = selected;
 
+  const notify = useCallback((msg: string) => {
+    setNotice(msg);
+    window.setTimeout(() => setNotice((n) => (n === msg ? null : n)), 4000);
+  }, []);
+  const errText = useCallback(
+    (e: unknown) => (e instanceof ApiError && e.status === 0 ? translations[loadLocalSettings().language].networkError : (e as Error).message),
+    [],
+  );
+
+  // ----- Thème & réglages locaux
   useEffect(() => {
-    const sessionId = getSession();
-    if (sessionId) {
-      const accounts = loadAccounts();
-      const found = accounts.find((a) => a.id === sessionId);
-      if (found) {
-        setAccount(found);
-        setData(loadAccountData(found.id, found.displayName));
-      }
+    saveLocalSettings(settings);
+    const dark = settings.theme === "dark" || (settings.theme === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.classList.toggle("dark", dark);
+  }, [settings]);
+
+  // ----- Chargements depuis le serveur
+  const refreshFriends = useCallback(async () => {
+    const [f, b] = await Promise.all([api.friends(), api.blocks()]);
+    const prev = incomingIdsRef.current;
+    if (prev) {
+      const fresh = f.incoming.find((e) => !prev.includes(e.friendshipId));
+      if (fresh) notify(`${translations[loadLocalSettings().language].newFriendRequest} ${fresh.user.displayName}`);
     }
-    setBooting(false);
+    incomingIdsRef.current = f.incoming.map((e) => e.friendshipId);
+    setFriends(f.friends); setIncoming(f.incoming); setOutgoing(f.outgoing); setBlocked(b.users);
+  }, [notify]);
+
+  const refreshConversations = useCallback(async () => {
+    const { conversations } = await api.conversations();
+    setPartners(conversations.map((c) => c.user));
+    setPreviews((p) => {
+      const next = { ...p };
+      for (const c of conversations) if (!next[`dm:${c.user.id}`]) next[`dm:${c.user.id}`] = c.last.text;
+      return next;
+    });
+  }, []);
+
+  const loadAll = useCallback(async () => {
+    const [ch] = await Promise.all([api.channels(), refreshFriends(), refreshConversations()]);
+    setChannels(ch.channels);
+  }, [refreshFriends, refreshConversations]);
+
+  const logout = useCallback(() => {
+    socketRef.current?.disconnect();
+    setToken(null);
+    setMe(null); setFriends([]); setIncoming([]); setOutgoing([]); setBlocked([]); setPartners([]);
+    setChannels([]); setMessages({}); setPreviews({}); setUnread({}); setAssistantMsgs([]);
+    setSelected({ type: "assistant" }); setSettingsOpen(false); setFriendsOpen(false);
+    incomingIdsRef.current = null;
+  }, []);
+
+  // ----- Démarrage : reconnexion automatique si un token existe
+  useEffect(() => {
+    (async () => {
+      if (getToken()) {
+        try {
+          const { user } = await api.me();
+          setMe(user);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) setToken(null);
+        }
+      }
+      setBooting(false);
+    })();
   }, []);
 
   useEffect(() => {
-    socket.on("receive_message", (msgData: { text: string; sender: string; room: string; type: "contact" | "channel" }) => {
-      if (!data) return;
-      const incomingMessage = {
-        id: Date.now(),
-        text: `${msgData.sender}: ${msgData.text}`,
-        mine: false,
-        time: timeNow(),
-      };
-      setData((prev) => {
-        if (!prev) return prev;
-        if (msgData.type === "contact") {
-          return {
-            ...prev,
-            contacts: prev.contacts.map((c) =>
-              c.id === msgData.room ? { ...c, preview: msgData.text, messages: [...c.messages, incomingMessage] } : c
-            ),
-          };
-        } else {
-          return {
-            ...prev,
-            channels: prev.channels.map((c) =>
-              c.id === msgData.room ? { ...c, preview: msgData.text, messages: [...c.messages, incomingMessage] } : c
-            ),
-          };
-        }
+    if (me) loadAll().catch((e) => notify(errText(e)));
+  }, [me?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ----- Ajout d'un message (sans doublon) + aperçu + non-lus
+  const addMessage = useCallback((key: string, msg: Msg, meId: number) => {
+    setMessages((prev) => {
+      const list = prev[key] || [];
+      if (list.some((m) => m.id === msg.id)) return prev;
+      return { ...prev, [key]: [...list, msg] };
+    });
+    setPreviews((p) => ({ ...p, [key]: msg.text }));
+    if (msg.senderId !== meId && keyOf(selRef.current) !== key) {
+      setUnread((u) => ({ ...u, [key]: (u[key] || 0) + 1 }));
+    }
+  }, []);
+
+  // ----- Temps réel (Socket.IO)
+  useEffect(() => {
+    const token = getToken();
+    if (!me || !token) return;
+    const meId = me.id;
+    const s = connectSocket(token);
+    socketRef.current = s;
+
+    s.on("dm:new", (msg: Msg) => {
+      const [a, b] = msg.room.split(":").map(Number);
+      const partner = a === meId ? b : a;
+      addMessage(`dm:${partner}`, msg, meId);
+      refreshConversations().catch(() => undefined);
+    });
+    s.on("channel:new", (msg: Msg) => addMessage(`channel:${msg.room}`, msg, meId));
+    s.on("channel:created", (c: Channel) => setChannels((p) => (p.some((x) => x.id === c.id) ? p : [...p, c])));
+    s.on("friends:update", () => { refreshFriends().catch(() => undefined); });
+    s.on("presence:list", (ids: number[]) => setOnline(new Set(ids)));
+    s.on("presence:update", ({ userId, online: on }: { userId: number; online: boolean }) =>
+      setOnline((prev) => { const n = new Set(prev); if (on) n.add(userId); else n.delete(userId); return n; }));
+    s.on("connect_error", (err) => { if (err.message === "unauthorized") logout(); });
+
+    return () => { s.disconnect(); socketRef.current = null; };
+  }, [me?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ----- Historique à l'ouverture d'une conversation
+  useEffect(() => {
+    if (!me || selected.type === "assistant") return;
+    const key = keyOf(selected);
+    setUnread((u) => (u[key] ? { ...u, [key]: 0 } : u));
+    const req = selected.type === "dm" ? api.dm(selected.id) : api.channelMessages(selected.id);
+    req.then(({ messages: list }) => {
+      setMessages((prev) => {
+        const merged = [...list];
+        for (const m of prev[key] || []) if (!merged.some((x) => x.id === m.id)) merged.push(m);
+        merged.sort((x, y) => x.id - y.id);
+        return { ...prev, [key]: merged };
       });
-    });
-    return () => { socket.off("receive_message"); };
-  }, [data, selected]);
+    }).catch((e) => notify(errText(e)));
+  }, [selected.type, (selected as { id?: number }).id, me?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    if (account && data) saveAccountData(account.id, data);
-  }, [account, data]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, assistantMsgs, selected]);
 
-  useEffect(() => {
-    if (account) setSession(account.id);
-  }, [account?.id]);
+  // ----- Données dérivées
+  const people = useMemo(() => {
+    const map = new Map<number, User>();
+    friends.forEach((f) => map.set(f.user.id, f.user));
+    partners.forEach((u) => { if (!map.has(u.id)) map.set(u.id, u); });
+    return [...map.values()];
+  }, [friends, partners]);
+  const blockedIds = useMemo(() => new Set(blocked.map((u) => u.id)), [blocked]);
 
-  function logout() {
-    setSession(null);
-    setAccount(null);
-    setData(null);
-    setSettingsOpen(false);
-  }
+  if (booting) return <div className="auth-shell"><div className="auth-card"><p className="auth-tagline">{tr.serverWaking}</p></div></div>;
+  if (!me) return <AuthScreen lang={settings.language} onAuthenticated={(u) => setMe(u)} />;
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [selected, data]);
+  const term = search.toLowerCase();
+  const visiblePeople = people.filter((u) => u.displayName.toLowerCase().includes(term) || u.username.includes(term));
+  const visibleChannels = channels.filter((c) => c.name.toLowerCase().includes(term));
+  const activeUser = selected.type === "dm" ? people.find((u) => u.id === selected.id) : undefined;
+  const activeChannel = selected.type === "channel" ? channels.find((c) => c.id === selected.id) : undefined;
+  const key = keyOf(selected);
 
-  if (booting) return null;
-  if (!account || !data) {
-    return (
-      <AuthScreen
-        lang="fr"
-        onAuthenticated={(acc) => {
-          setAccount(acc);
-          setData(loadAccountData(acc.id, acc.displayName));
-        }}
-      />
-    );
-  }
+  const viewMessages: ViewMsg[] =
+    selected.type === "assistant"
+      ? assistantMsgs
+      : (messages[key] || []).map((m) => ({
+          id: m.id, mine: m.senderId === me.id, author: selected.type === "channel" ? m.senderName : undefined,
+          text: m.text, time: timeOf(m.createdAt),
+        }));
 
-  const tr = translations[data.settings.language || "fr"];
-  const activeContact = selected.type === "contact" ? data.contacts.find((c) => c.id === selected.id) : undefined;
-  const activeChannel = selected.type === "channel" ? data.channels.find((c) => c.id === selected.id) : undefined;
-  const visibleContacts = data.contacts.filter((c) => !c.archived && c.name.toLowerCase().includes(search.toLowerCase()));
-  const visibleChannels = data.channels.filter((c) => !c.archived && c.name.toLowerCase().includes(search.toLowerCase()));
+  const title = selected.type === "assistant" ? tr.assistantName : activeUser ? activeUser.displayName : activeChannel ? `${activeChannel.emoji} ${activeChannel.name}` : "";
+  const subtitle = selected.type === "dm" && activeUser ? (online.has(activeUser.id) ? tr.online : tr.offline) : "";
+  const isBlocked = activeUser ? blockedIds.has(activeUser.id) : false;
 
-  function sendMessage() {
+  function pick(s: Sel) { setSelected(s); setMobileSidebar(false); }
+
+  async function send() {
     const value = text.trim();
-    if (!value) return;
-    const message = { id: Date.now(), text: value, mine: true, time: timeNow() };
-
-    socket.emit("send_message", {
-      text: value,
-      sender: account.displayName,
-      room: selected.id,
-      type: selected.type
-    });
-
-    setData((prev) => {
-      if (!prev) return prev;
-      if (selected.type === "contact") {
-        return {
-          ...prev,
-          contacts: prev.contacts.map((c) =>
-            c.id === selected.id ? { ...c, preview: value, messages: [...c.messages, message] } : c
-          ),
-        };
-      } else {
-        return {
-          ...prev,
-          channels: prev.channels.map((c) =>
-            c.id === selected.id ? { ...c, preview: value, messages: [...c.messages, message] } : c
-          ),
-        };
-      }
-    });
-
-    if (activeContact?.kind === "assistant") {
-      const reply = assistantReply(value, data.settings.language);
-      setTimeout(() => {
-        setData((prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            contacts: prev.contacts.map((c) =>
-              c.id === "assistant" ? { ...c, preview: reply, messages: [...c.messages, { id: Date.now() + 1, text: reply, mine: false, time: timeNow() }] } : c
-            ),
-          };
-        });
-      }, 500);
+    if (!value || !me) return;
+    if (selected.type === "assistant") {
+      setAssistantMsgs((p) => [...p, { id: `u${Date.now()}`, mine: true, text: value, time: timeOf(Date.now()) }]);
+      const reply = assistantReply(value, settings.language);
+      window.setTimeout(() => setAssistantMsgs((p) => [...p, { id: `a${Date.now()}`, mine: false, text: reply, time: timeOf(Date.now()) }]), 500);
+      setText("");
+      return;
     }
     setText("");
+    try {
+      const { message } = selected.type === "dm" ? await api.sendDm(selected.id, value) : await api.sendChannel(selected.id, value);
+      addMessage(key, message, me.id);
+    } catch (e) {
+      setText(value);
+      notify(errText(e));
+    }
   }
 
-  function createChannel() {
+  async function addFriend(username: string) {
+    try {
+      const { status } = await api.requestFriend(username);
+      await refreshFriends();
+      return { ok: true, message: status === "accepted" ? tr.nowFriends : tr.requestSent };
+    } catch (e) { return { ok: false, message: errText(e) }; }
+  }
+  const act = (fn: () => Promise<unknown>) => fn().then(() => refreshFriends()).catch((e) => notify(errText(e)));
+
+  async function createChannel() {
     const name = newChannelName.trim();
     if (!name) return;
-    const id = `salon-${Date.now()}`;
-    const channel: Channel = { id, name, emoji: newChannelEmoji, archived: false, unread: 0, preview: "", messages: [] };
-    setData((prev) => prev ? { ...prev, channels: [...prev.channels, channel] } : prev);
-    setNewChannelName("");
-    setCreateChannelOpen(false);
-    setSelected({ type: "channel", id });
+    try {
+      const { channel } = await api.createChannel(name, newChannelEmoji);
+      setChannels((p) => (p.some((c) => c.id === channel.id) ? p : [...p, channel]));
+      setNewChannelName(""); setCreateChannelOpen(false);
+      pick({ type: "channel", id: channel.id });
+    } catch (e) { notify(errText(e)); }
+  }
+
+  async function saveProfile(patch: { displayName?: string; permission?: Permission }) {
+    try { const { user } = await api.updateMe(patch); setMe(user); } catch (e) { notify(errText(e)); }
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground font-sans antialiased">
-      <div className={`fixed inset-y-0 left-0 z-40 flex w-80 flex-col border-r bg-card transition-transform lg:static lg:translate-x-0 ${mobileSidebar ? "translate-x-0" : "-translate-x-full"}`}>
-        <div className="flex h-16 items-center justify-between px-4 border-b">
-          <span className="text-xl font-bold tracking-tight text-primary flex items-center gap-2">
-            <Sparkles className="h-5 w-5" /> NexusChat
-          </span>
-          <button className="lg:hidden p-1.5 hover:bg-muted rounded-md" onClick={() => setMobileSidebar(false)}><Menu className="h-5 w-5" /></button>
+    <div className="app-shell">
+      <aside className={`sidebar ${mobileSidebar ? "sidebar-open" : ""}`}>
+        <div className="sidebar-header">
+          <div className="brand"><div className="brand-mark"><Sparkles size={18} /></div>{tr.appName}</div>
         </div>
-        <div className="p-4 border-b">
-          <div className="relative">
-            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-            <input type="text" placeholder={tr.searchPlaceholder} className="w-full rounded-md border bg-muted/50 py-2 pl-9 pr-4 text-sm focus:outline-none" value={search} onChange={(e) => setSearch(e.target.value)} />
-          </div>
+
+        <button className="new-chat" onClick={() => setFriendsOpen(true)}>
+          <UserPlus size={17} /> {tr.addFriend}{incoming.length > 0 && <span className="unread">{incoming.length}</span>}
+        </button>
+        <div className="search-box"><Search size={16} /><input placeholder={tr.searchPlaceholder} value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+
+        <div className="section-title-row">
+          <span className="section-title">{tr.channels}</span>
+          <button className="icon-button" onClick={() => setCreateChannelOpen(true)} title={tr.createChannel}><Plus size={16} /></button>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          <div>
-            <div className="flex items-center justify-between mb-2 text-xs font-semibold uppercase text-muted-foreground">
-              <span>{tr.channels}</span>
-              <button onClick={() => setCreateChannelOpen(true)} className="p-1 hover:bg-muted rounded"><Plus className="h-4 w-4" /></button>
-            </div>
-            <div className="space-y-1">
-              {visibleChannels.map((c) => (
-                <button key={c.id} onClick={() => { setSelected({ type: "channel", id: c.id }); setMobileSidebar(false); }} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium ${selected.type === "channel" && selected.id === c.id ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
-                  <span>{c.emoji}</span><span className="truncate">{c.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="mb-2 text-xs font-semibold uppercase text-muted-foreground"><span>{tr.directMessages}</span></div>
-            <div className="space-y-1">
-              {visibleContacts.map((c) => (
-                <button key={c.id} onClick={() => { setSelected({ type: "contact", id: c.id }); setMobileSidebar(false); }} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium ${selected.type === "contact" && selected.id === c.id ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
-                  <Avatar initials={initialsFrom(c.name)} online={c.kind === "assistant"} /><span className="truncate">{c.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+        <div className="conversation-list conversation-list-compact">
+          {visibleChannels.map((c) => (
+            <button key={c.id} className={`conversation ${selected.type === "channel" && selected.id === c.id ? "conversation-active" : ""}`} onClick={() => pick({ type: "channel", id: c.id })}>
+              <div className="contact-avatar">{c.emoji}</div>
+              <div className="conversation-copy">
+                <span className="conversation-name">{c.name}</span>
+                <span className="conversation-preview">{previews[`channel:${c.id}`] || ""}</span>
+              </div>
+              {unread[`channel:${c.id}`] > 0 && <span className="unread">{unread[`channel:${c.id}`]}</span>}
+            </button>
+          ))}
         </div>
-        <div className="p-4 border-t flex items-center justify-between bg-muted/30">
-          <div className="flex items-center gap-3 truncate">
-            <Avatar initials={initialsFrom(account.displayName)} />
-            <div className="flex flex-col truncate">
-              <span className="text-sm font-medium leading-none">{account.displayName}</span>
-              <span className="text-xs text-muted-foreground">@{account.username}</span>
+
+        <div className="section-title" style={{ marginTop: 12 }}>{tr.directMessages}</div>
+        <div className="conversation-list" style={{ flex: 1 }}>
+          <button className={`conversation ${selected.type === "assistant" ? "conversation-active" : ""}`} onClick={() => pick({ type: "assistant" })}>
+            <Avatar initials="N" online />
+            <div className="conversation-copy"><span className="conversation-name">{tr.assistantName}</span></div>
+          </button>
+          {visiblePeople.map((u) => (
+            <button key={u.id} className={`conversation ${selected.type === "dm" && selected.id === u.id ? "conversation-active" : ""}`} onClick={() => pick({ type: "dm", id: u.id })}>
+              <Avatar initials={initialsFrom(u.displayName)} online={online.has(u.id)} />
+              <div className="conversation-copy">
+                <span className="conversation-name">{u.displayName}</span>
+                <span className="conversation-preview">{previews[`dm:${u.id}`] || `@${u.username}`}</span>
+              </div>
+              {unread[`dm:${u.id}`] > 0 && <span className="unread">{unread[`dm:${u.id}`]}</span>}
+            </button>
+          ))}
+        </div>
+
+        <div className="sidebar-footer">
+          <div className="conversation" style={{ cursor: "default" }}>
+            <Avatar initials={initialsFrom(me.displayName)} online />
+            <div className="conversation-copy">
+              <span className="conversation-name">{me.displayName}</span>
+              <span className="conversation-preview">@{me.username}</span>
             </div>
           </div>
+          <button className="footer-button" onClick={() => setSettingsOpen(true)}><SettingsIcon size={16} /> {tr.settings}</button>
+          <button className="footer-button" onClick={logout}><LogOut size={16} /> {tr.logout}</button>
+        </div>
+      </aside>
+      {mobileSidebar && <button className="backdrop" aria-label={tr.close} onClick={() => setMobileSidebar(false)} />}
+
+      <main className="chat-panel">
+        <header className="chat-header">
+          <button className="icon-button mobile-only" onClick={() => setMobileSidebar(true)}><Menu size={20} /></button>
+          <div className="chat-title">
+            <strong>{title}</strong>
+            {subtitle && <span className="contact-preview">{subtitle}</span>}
+          </div>
+          <div className="header-actions">
+            {activeUser && (
+              <button className="icon-button" title={isBlocked ? tr.unblock : tr.block}
+                onClick={() => act(() => (isBlocked ? api.unblock(activeUser.id) : api.block(activeUser.id)))}>
+                {isBlocked ? <CheckCircle2 size={18} /> : <Ban size={18} />}
+              </button>
+            )}
+            <button className="icon-button" title={tr.friends} onClick={() => setFriendsOpen(true)}><UserPlus size={18} /></button>
+          </div>
+        </header>
+
+        {notice && <div className="auth-error" style={{ margin: "8px 16px 0" }}>{notice}</div>}
+
+        <div className="messages">
+          {viewMessages.length === 0 && (
+            <div className="welcome-card">
+              <div className="welcome-icon"><Sparkles size={20} /></div>
+              <div><h2>{tr.welcomeTitle} {title}</h2><p>{selected.type === "assistant" ? tr.welcomeText : tr.noMessages}</p></div>
+            </div>
+          )}
+          {viewMessages.map((m) => (
+            <div key={m.id} className={`message-row ${m.mine ? "message-row-mine" : ""}`}>
+              <div className={`message ${m.mine ? "message-mine" : ""}`}>
+                {m.author && !m.mine && <strong style={{ display: "block", fontSize: 12 }}>{m.author}</strong>}
+                <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.text}</span>
+                <div className="message-meta">{m.time}</div>
+              </div>
+            </div>
+          ))}
+          <div ref={endRef} />
+        </div>
+
+        <div className="composer-wrap">
+          {isBlocked ? (
+            <div className="blocked-composer-notice">{tr.blockedByYou}</div>
+          ) : (
+            <>
+              <div className="composer">
+                <textarea rows={1} value={text} placeholder={tr.writeMessage} onChange={(e) => setText(e.target.value)} maxLength={2000}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} />
+                <button className="send-button" onClick={send} disabled={!text.trim()}><Send size={18} /></button>
+              </div>
+              <div className="composer-hint">{tr.sendHint}</div>
+            </>
+          )}
+        </div>
+      </main>
+
+      <FriendsDialog open={friendsOpen} onOpenChange={setFriendsOpen} lang={settings.language}
+        friends={friends} incoming={incoming} outgoing={outgoing} online={online}
+        onAdd={addFriend}
+        onAccept={(id) => act(() => api.acceptFriend(id))}
+        onRemove={(id) => act(() => api.removeFriend(id))}
+        onMessage={(id) => pick({ type: "dm", id })}
+        onBlock={(id) => act(() => api.block(id))} />
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} me={me} settings={settings} blocked={blocked}
+        onUpdateSettings={(next) => setSettings((s) => ({ ...s, ...next }))}
+        onSaveName={(displayName) => saveProfile({ displayName })}
+        onSetPermission={(permission) => saveProfile({ permission })}
+        onUnblock={(id) => act(() => api.unblock(id))} />
+
+      <Dialog open={createChannelOpen} onOpenChange={setCreateChannelOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{tr.createChannel}</DialogTitle></DialogHeader>
+          <div className="emoji-picker">
+            {EMOJI_CHOICES.map((e) => (
+              <button key={e} className={`emoji-picker-item ${newChannelEmoji === e ? "option-chip-active" : ""}`} onClick={() => setNewChannelEmoji(e)}>{e}</button>
+            ))}
+          </div>
+          <label className="auth-field">
+            <span>{tr.channelName}</span>
+            <input value={newChannelName} onChange={(e) => setNewChannelName(e.target.value)} maxLength={30} onKeyDown={(e) => e.key === "Enter" && createChannel()} />
+          </label>
+          <div className="dialog-actions">
+            <button className="footer-button" onClick={() => setCreateChannelOpen(false)}>{tr.cancel}</button>
+            <button className="new-chat" style={{ margin: 0 }} onClick={createChannel}>{tr.create}</button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

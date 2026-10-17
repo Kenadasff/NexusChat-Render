@@ -1,77 +1,23 @@
 export type Theme = "light" | "dark" | "auto";
 export type Lang = "fr" | "en";
-export type Permission = "everyone" | "contacts" | "none";
+export type { Permission } from "./api";
 
-export type ChatMessage = {
-  id: number;
-  text: string;
-  mine: boolean;
-  time: string;
-};
+// Réglages purement locaux (thème / langue), gardés dans le navigateur
+export type LocalSettings = { theme: Theme; language: Lang };
 
-export type Contact = {
-  id: string;
-  name: string;
-  initials: string;
-  kind: "assistant" | "team" | "direct";
-  status: "online" | "offline";
-  archived: boolean;
-  deletable: boolean;
-  messages: ChatMessage[];
-  preview: string;
-  unread: number;
-};
+const SETTINGS_KEY = "nexuschat.settings";
 
-export type Channel = {
-  id: string;
-  name: string;
-  emoji: string;
-  archived: boolean;
-  messages: ChatMessage[];
-  preview: string;
-  unread: number;
-};
+export function loadLocalSettings(): LocalSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return { theme: "auto", language: "fr", ...(raw ? JSON.parse(raw) : {}) };
+  } catch {
+    return { theme: "auto", language: "fr" };
+  }
+}
 
-export type Settings = {
-  theme: Theme;
-  language: Lang;
-  messagingPermission: Permission;
-  notificationsEnabled: boolean;
-  notificationsSound: boolean;
-};
-
-export type AppNotification = {
-  id: number;
-  text: string;
-  time: string;
-  read: boolean;
-};
-
-export type Account = {
-  id: string;
-  username: string;
-  password: string;
-  displayName: string;
-  initials: string;
-};
-
-export type AccountData = {
-  contacts: Contact[];
-  channels: Channel[];
-  blocked: string[];
-  settings: Settings;
-  notifications: AppNotification[];
-};
-
-const ACCOUNTS_KEY = "nexuschat.accounts";
-const SESSION_KEY = "nexuschat.session";
-const dataKey = (accountId: string) => `nexuschat.data.${accountId}`;
-
-export function timeNow() {
-  return new Intl.DateTimeFormat("fr-FR", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date());
+export function saveLocalSettings(s: LocalSettings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 }
 
 export function initialsFrom(name: string) {
@@ -81,147 +27,8 @@ export function initialsFrom(name: string) {
   return (parts[0][0] + parts[1][0]).toUpperCase();
 }
 
-export function loadAccounts(): Account[] {
-  try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY);
-    return raw ? (JSON.parse(raw) as Account[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function saveAccounts(accounts: Account[]) {
-  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
-}
-
-export function getSession(): string | null {
-  return localStorage.getItem(SESSION_KEY);
-}
-
-export function setSession(accountId: string | null) {
-  if (accountId) localStorage.setItem(SESSION_KEY, accountId);
-  else localStorage.removeItem(SESSION_KEY);
-}
-
-export function defaultSettings(): Settings {
-  return {
-    theme: "auto",
-    language: "fr",
-    messagingPermission: "contacts",
-    notificationsEnabled: true,
-    notificationsSound: true,
-  };
-}
-
-export function seedData(displayName: string): AccountData {
-  return {
-    contacts: [
-      {
-        id: "assistant",
-        name: "Nexus Assistant",
-        initials: "N",
-        kind: "assistant",
-        status: "online",
-        archived: false,
-        deletable: false,
-        preview: "Bienvenue sur NexusChat 👋",
-        unread: 0,
-        messages: [
-          { id: 1, text: "Bienvenue sur NexusChat 👋", mine: false, time: timeNow() },
-          {
-            id: 2,
-            text: "Je suis Nexus Assistant, je suis là pour aider les membres. Pose-moi une question sur les paramètres, les salons, les contacts ou le blocage.",
-            mine: false,
-            time: timeNow(),
-          },
-        ],
-      },
-      {
-        id: "kenan",
-        name: "Kenan",
-        initials: "KE",
-        kind: "direct",
-        status: "online",
-        archived: false,
-        deletable: true,
-        preview: "Salut, tout est prêt de mon côté.",
-        unread: 1,
-        messages: [
-          { id: 1, text: "Salut, tout est prêt de mon côté.", mine: false, time: timeNow() },
-        ],
-      },
-      {
-        id: "team-nexus",
-        name: "Équipe Nexus",
-        initials: "EN",
-        kind: "team",
-        status: "online",
-        archived: false,
-        deletable: false,
-        preview: `${displayName} et Kenan`,
-        unread: 0,
-        messages: [
-          {
-            id: 1,
-            text: "Ce salon d'équipe ne contient que toi (administrateur) et Kenan.",
-            mine: false,
-            time: timeNow(),
-          },
-        ],
-      },
-    ],
-    channels: [
-      {
-        id: "accueil",
-        name: "Accueil",
-        emoji: "🏠",
-        archived: false,
-        preview: "Bienvenue dans le salon Accueil.",
-        unread: 0,
-        messages: [
-          { id: 1, text: "Bienvenue dans le salon Accueil.", mine: false, time: timeNow() },
-        ],
-      },
-      {
-        id: "gaming",
-        name: "Gaming",
-        emoji: "🎮",
-        archived: false,
-        preview: "On joue ce soir ?",
-        unread: 0,
-        messages: [
-          { id: 1, text: "On joue ce soir ?", mine: false, time: timeNow() },
-        ],
-      },
-    ],
-    blocked: [],
-    settings: defaultSettings(),
-    notifications: [
-      { id: 1, text: "Bienvenue sur NexusChat 👋", time: timeNow(), read: false },
-    ],
-  };
-}
-
-export function loadAccountData(accountId: string, displayName: string): AccountData {
-  try {
-    const raw = localStorage.getItem(dataKey(accountId));
-    if (!raw) return seedData(displayName);
-    const parsed = JSON.parse(raw) as AccountData;
-    // fill defaults for any missing fields (forward-compat)
-    return {
-      contacts: parsed.contacts ?? seedData(displayName).contacts,
-      channels: parsed.channels ?? seedData(displayName).channels,
-      blocked: parsed.blocked ?? [],
-      settings: { ...defaultSettings(), ...(parsed.settings ?? {}) },
-      notifications: parsed.notifications ?? [],
-    };
-  } catch {
-    return seedData(displayName);
-  }
-}
-
-export function saveAccountData(accountId: string, data: AccountData) {
-  localStorage.setItem(dataKey(accountId), JSON.stringify(data));
+export function timeOf(iso: string | number | Date) {
+  return new Intl.DateTimeFormat("fr-FR", { hour: "2-digit", minute: "2-digit" }).format(new Date(iso));
 }
 
 // --- Nexus Assistant reply logic (local, rule-based) ---
@@ -256,6 +63,30 @@ export function assistantReply(userText: string, lang: Lang): string {
 export const translations = {
   fr: {
     appName: "NexusChat",
+    searchPlaceholder: "Rechercher...",
+    directMessages: "Messages privés",
+    friends: "Amis",
+    addFriend: "Ajouter un ami",
+    friendUsername: "Identifiant de ton ami",
+    friendRequests: "Demandes reçues",
+    sentRequests: "Demandes envoyées",
+    accept: "Accepter",
+    decline: "Refuser",
+    removeFriend: "Retirer",
+    noFriends: "Pas encore d'amis. Ajoute quelqu'un avec son identifiant !",
+    requestSent: "Demande envoyée !",
+    nowFriends: "Vous êtes maintenant amis !",
+    newFriendRequest: "Nouvelle demande d'ami de",
+    serverWaking: "Connexion au serveur… (le premier démarrage peut prendre jusqu'à une minute)",
+    networkError: "Impossible de joindre le serveur. Réessaie dans un instant.",
+    assistantName: "Nexus Assistant",
+    pickConversation: "Choisis une conversation dans la liste.",
+    noMessages: "Aucun message pour l'instant. Dis bonjour !",
+    blockedByYou: "Tu as bloqué cet utilisateur.",
+    close: "Fermer",
+    messageHim: "Écrire",
+    newChannelTitle: "Nouveau salon",
+
     newChat: "Nouvelle conversation",
     search: "Rechercher",
     conversations: "Conversations",
@@ -330,6 +161,30 @@ export const translations = {
   },
   en: {
     appName: "NexusChat",
+    searchPlaceholder: "Search...",
+    directMessages: "Direct messages",
+    friends: "Friends",
+    addFriend: "Add a friend",
+    friendUsername: "Your friend's username",
+    friendRequests: "Received requests",
+    sentRequests: "Sent requests",
+    accept: "Accept",
+    decline: "Decline",
+    removeFriend: "Remove",
+    noFriends: "No friends yet. Add someone with their username!",
+    requestSent: "Request sent!",
+    nowFriends: "You are now friends!",
+    newFriendRequest: "New friend request from",
+    serverWaking: "Connecting to the server… (first start can take up to a minute)",
+    networkError: "Can't reach the server. Try again in a moment.",
+    assistantName: "Nexus Assistant",
+    pickConversation: "Pick a conversation from the list.",
+    noMessages: "No messages yet. Say hello!",
+    blockedByYou: "You blocked this user.",
+    close: "Close",
+    messageHim: "Message",
+    newChannelTitle: "New channel",
+
     newChat: "New conversation",
     search: "Search",
     conversations: "Conversations",
